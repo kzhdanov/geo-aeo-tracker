@@ -4,6 +4,46 @@ All notable changes to GEO/AEO Tracker are documented here.
 
 ---
 
+## [1.3.0] — 2026-06-11
+
+### ✨ Runs in their own Supabase table; cloud storage is now required
+
+Each scrape run is now stored as a row in a `runs` Postgres table instead of
+inside the single `kv_store` JSON blob. This unlocks SQL analytics over run
+history, removes the 500-run cap, and lets external analyzers (Claude Code /
+OpenRouter) write verdicts without racing the app's autosave. IndexedDB /
+localStorage fallbacks are removed — Supabase is the single source of truth.
+
+**What changed**
+
+- **`supabase/migrations/002_runs.sql`** — new `runs` table (one row per scrape
+  run, RLS on / service-role only) and `run_analyses` table for upcoming LLM
+  analyzer verdicts. Paste and run in your Supabase SQL editor.
+- **`app/api/runs/route.ts`** — new `GET / POST / DELETE` route for runs;
+  same server-side service-role proxy model as `/api/state`.
+- **`lib/server/runs-store.ts`** — list/insert/delete helpers for the table.
+- **`lib/client/runs-api.ts`** — client wrapper for `/api/runs`.
+- **`lib/client/sovereign-store.ts`** — cloud-only rewrite. No IDB/localStorage
+  fallback: serving a stale local copy and autosaving it back could silently
+  roll back newer cloud data. Errors now surface in the UI instead.
+- **`lib/client/cloud-mode.ts`** — removed (cloud can no longer be toggled off).
+- **`components/sovereign-dashboard.tsx`** — runs load from `/api/runs` and
+  persist per-row; the settings blob no longer contains `runs`; legacy blob
+  runs are lifted into the table automatically on first load; the workspace
+  list now syncs to cloud KV too (theme and active-workspace pointer stay in
+  localStorage as device prefs); run deletion hits the API.
+- **`components/dashboard/tabs/project-settings-tab.tsx`** — Cloud Sync toggle
+  card removed.
+- **`package.json`** — removed `idb-keyval`.
+
+**Breaking**
+
+- The app now requires `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY` and shows
+  an error instead of falling back to browser storage when the cloud is
+  unreachable. `NEXT_PUBLIC_CLOUD_STORAGE_ENABLED` is no longer read.
+
+---
+
 ## [1.2.0] — 2026-04-17
 
 ### ✨ New: Optional Supabase cloud persistence

@@ -7,10 +7,14 @@ export type Provider =
   | "grok";
 
 export type ScrapeRun = {
+  /** Supabase row id; absent only for demo data and unsaved in-memory runs */
+  id?: string;
   provider: Provider;
   prompt: string;
   answer: string;
   sources: string[];
+  /** Tags of the tracked prompt this run came from; drives analyzer rubric (brand/discovery) */
+  promptTags: string[];
   createdAt: string;
   /** 0-100 visibility score based on brand mention, position, sentiment */
   visibilityScore: number;
@@ -168,6 +172,7 @@ export const tabs = [
   "Persona Fan-Out",
   "Niche Explorer",
   "Responses",
+  "Brand Reputation",
   "Visibility Analytics",
   "Citations",
   "Citation Opportunities",

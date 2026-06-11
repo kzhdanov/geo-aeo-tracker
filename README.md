@@ -11,7 +11,7 @@
 <h1 align="center">GEO/AEO Tracker</h1>
 
 <p align="center">
-  Open-source, local-first AI visibility intelligence dashboard.<br/>
+  Open-source, self-hosted AI visibility intelligence dashboard.<br/>
   Track your brand across <strong>6 AI models</strong> with zero vendor lock-in.<br/>
   Now with <strong>SRO Analysis</strong> — deep cross-platform search result optimization.<br/>
   <strong>Mobile-responsive</strong> — works seamlessly on desktop, tablet, and phone.
@@ -21,7 +21,7 @@
   <a href="#features"><strong>Features</strong></a> · 
   <a href="#quick-start"><strong>Quick Start</strong></a> · 
   <a href="#deploy-to-vercel"><strong>Deploy</strong></a> · 
-  <a href="#-optional-cloud-persistence-with-supabase"><strong>Cloud Sync</strong></a> · 
+  <a href="#-cloud-persistence-with-supabase-required"><strong>Cloud Storage</strong></a> · 
   <a href="#api-routes"><strong>API</strong></a>
 </p>
 
@@ -41,11 +41,11 @@ Existing tools charge **$200–$500+/month**, lock you into closed ecosystems, a
 
 **GEO/AEO Tracker** is the alternative:
 
-- 🔑 **BYOK** (Bring Your Own Keys): your data never leaves your machine
+- 🔑 **BYOK** (Bring Your Own Keys): your keys, your database, your data
 - 🤖 **6 AI models** simultaneously: more coverage than paid tools
 - 💸 **$0/month**: self-hosted, open-source, forever free
-- 🛡️ **Local-first** by default: IndexedDB + localStorage, no external database
-- ☁️ **Optional cloud sync** via your own Supabase project (free tier) for multi-device access
+- 🛡️ **BYO database**: all data lives in your own free Supabase project (Postgres) — no third-party servers
+- ☁️ **Multi-device**: runs, prompts, and settings follow you across browsers and devices
 
 ## Features
 
@@ -97,7 +97,8 @@ Next.js 16.1 + Turbopack
 │       ├── unlocker/route.ts       # Bright Data Web Unlocker (single/batch)
 │       ├── brightdata-platforms/   # 6-platform AI citation polling
 │       ├── bulk-sro/route.ts       # SSE bulk SRO analysis
-│       └── state/route.ts          # Cloud KV store (GET/PUT/DELETE — Node runtime)
+│       ├── state/route.ts          # Cloud KV store (GET/PUT/DELETE — Node runtime)
+│       └── runs/route.ts           # Runs table API (GET/POST/DELETE — Node runtime)
 ├── components/
 │   ├── sovereign-dashboard.tsx     # Main shell — state, tabs, KPIs
 │   └── dashboard/
@@ -105,11 +106,12 @@ Next.js 16.1 + Turbopack
 │       └── tabs/                   # 13 tab components
 ├── lib/
 │   ├── client/
-│   │   ├── sovereign-store.ts      # Storage API — IDB default, cloud when configured
-│   │   └── cloud-mode.ts           # isCloudActive / isCloudAvailable helpers
+│   │   ├── sovereign-store.ts      # Settings storage API (via /api/state)
+│   │   └── runs-api.ts             # Runs API client (via /api/runs)
 │   ├── server/
 │   │   ├── supabase.ts             # Server-side Supabase singleton (service_role)
 │   │   ├── kv-store.ts             # kvGet / kvSet / kvDelete helpers
+│   │   ├── runs-store.ts           # runs table list/insert/delete helpers
 │   │   ├── brightdata-scraper.ts   # Bright Data AI Scraper integration
 │   │   ├── brightdata-platforms.ts # 6-platform citation scraper
 │   │   ├── gemini-grounding.ts     # Gemini Grounding via Google Search
@@ -120,16 +122,17 @@ Next.js 16.1 + Turbopack
 │   └── demo-data.ts                # Deterministic seed data for demo mode
 ├── supabase/
 │   └── migrations/
-│       └── 001_kv_store.sql        # kv_store table + updated_at trigger
+│       ├── 001_kv_store.sql        # kv_store table + updated_at trigger
+│       └── 002_runs.sql            # runs + run_analyses tables
 └── scripts/
     ├── test-scraper.js             # API validation script
     └── test-pillar.js              # Feature pillar tests
 ```
 
 **Key decisions:**
-- **IndexedDB** primary store (no size limit) with localStorage as best-effort cache; same public API whether cloud is active or not
-- **Cloud storage routes through `/api/state`** — the client never calls Supabase directly, so `service_role` stays server-side and RLS isn't a concern
-- **Auto-opt-in cloud**: when `NEXT_PUBLIC_CLOUD_STORAGE_ENABLED=true` the IDB write path becomes a cache; IDB is the authoritative fallback if the cloud route fails
+- **Supabase (Postgres) is the single source of truth** — settings live as JSON blobs in `kv_store`, every scrape run is a row in `runs`. No local fallback: a stale local copy autosaved back to the cloud silently rolls back newer data
+- **Cloud storage routes through `/api/state` and `/api/runs`** — the client never calls Supabase directly, so `service_role` stays server-side and RLS isn't a concern
+- **Runs as rows** enable SQL analytics over history and let external LLM analyzers write `run_analyses` verdicts without racing the app's autosave
 - **Edge runtime** for `/api/analyze` (Gemini Flash via OpenRouter) — fast global inference
 - **Bright Data Web Scraper API** for AI model scraping — reliable, structured data
 - **Bright Data SERP + Web Unlocker** for SRO pipeline data gathering
@@ -205,40 +208,37 @@ Want to deploy a read-only preview with sample data and no API keys?
 1. Add env var `NEXT_PUBLIC_DEMO_ONLY` = `true` in Vercel → Project Settings → Environment Variables
 2. Redeploy. The dashboard will load with pre-generated demo data instead of making live API calls
 
-### ☁️ Optional: Cloud persistence with Supabase
+### ☁️ Cloud persistence with Supabase (required)
 
-By default, **all your data stays in your browser** (IndexedDB). That's great for a single device, but if you want your runs, prompts, and settings to persist across devices — or survive clearing browser data — you can plug in a free Supabase project.
-
-**Why it's optional**
-- Local-first still works 100% without Supabase.
-- When enabled, the client never talks to Supabase directly. Every read/write goes through a server-side Next.js route using your service-role key, so your key stays private and RLS is a non-issue.
-- You can toggle cloud sync on/off per-browser from **Project Settings → Cloud Sync**.
+All app data lives in **your own free Supabase project**: settings as JSON blobs in `kv_store`, each scrape run as a row in `runs`. The client never talks to Supabase directly — every read/write goes through a server-side Next.js route using your service-role key, so the key stays private and RLS is a non-issue.
 
 **Setup (5 minutes)**
 
 1. Create a free project at [supabase.com](https://supabase.com/).
-2. In the Supabase SQL editor, paste and run `supabase/migrations/001_kv_store.sql` from this repo. This creates a single `kv_store` table with RLS enabled.
+2. In the Supabase SQL editor, paste and run from this repo, in order:
+   - `supabase/migrations/001_kv_store.sql` — `kv_store` table (settings blobs)
+   - `supabase/migrations/002_runs.sql` — `runs` + `run_analyses` tables
 3. In Supabase → **Project Settings → API**, grab:
    - `Project URL` → `SUPABASE_URL`
    - `service_role` secret key → `SUPABASE_SERVICE_ROLE_KEY`
-4. In Vercel → **Project Settings → Environment Variables**, add:
+4. In Vercel → **Project Settings → Environment Variables** (or local `.env`), add:
 
    ```env
    SUPABASE_URL=https://your-project.supabase.co
    SUPABASE_SERVICE_ROLE_KEY=your_service_role_key
-   NEXT_PUBLIC_CLOUD_STORAGE_ENABLED=true
    ```
 
-5. Redeploy. The Project Settings tab will now show a Cloud Sync card.
+5. Redeploy. Without these vars the app loads but shows a "cloud unavailable" error and pauses saving.
 
 **Free tier caveats** (always check [supabase.com/pricing](https://supabase.com/pricing) for current limits)
 - Free tier includes a generous Postgres database, but projects pause after a week of inactivity on the free plan — first request after a pause may be slow.
 - The `service_role` key has full DB access — keep it server-side only (Vercel env vars are fine; never commit it).
 - Single-tenant by design: one deployment = one Supabase project = your data. If you want multi-user auth, you'll need to extend the schema with a user_id column + RLS policies.
 
-**What gets synced**
-- All app state keyed by workspace (`sovereign-aeo-tracker-*`) — runs, prompts, settings, SRO results.
-- NOT synced (kept local on purpose): theme preference, workspace list, active workspace — these are per-device UI choices.
+**What gets stored where**
+- `runs` table — one row per scrape run (prompt, answer, sources, visibility score, sentiment), per workspace.
+- `kv_store` — settings blob per workspace (`sovereign-aeo-tracker-*`) and the workspace list (`sovereign-workspaces`).
+- Kept local on purpose: theme preference and active-workspace pointer — per-device UI choices.
 
 ## API Routes
 
@@ -254,6 +254,7 @@ By default, **all your data stays in your browser** (IndexedDB). That's great fo
 | `POST /api/brightdata-platforms` | Node.js | 6-platform AI citation polling via Bright Data datasets |
 | `POST /api/bulk-sro` | Node.js | SSE streaming — bulk SRO analysis across multiple keywords |
 | `GET/PUT/DELETE /api/state` | Node.js | Cloud KV store proxy — reads/writes to Supabase using service-role key (disabled when cloud not configured) |
+| `GET/POST/DELETE /api/runs` | Node.js | Runs table proxy — list/insert/delete scrape runs in Supabase (disabled when cloud not configured) |
 
 All routes include input validation and error handling. Most routes use in-memory caching to minimize API costs.
 
@@ -266,7 +267,7 @@ All routes include input validation and error handling. Most routes use in-memor
 | Styling | Tailwind CSS v4 with `@theme inline` |
 | Charts | Recharts |
 | Validation | Zod |
-| Storage | IndexedDB (idb-keyval) + localStorage, optional Supabase cloud sync |
+| Storage | Supabase (Postgres) via server-side proxy routes |
 | AI Scraping | Bright Data Web Scraper API |
 | LLM Inference | OpenRouter (Gemini Flash) |
 | SRO Grounding | Google Gemini API (`@google/genai`) |

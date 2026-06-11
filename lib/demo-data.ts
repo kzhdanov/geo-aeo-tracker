@@ -121,7 +121,7 @@ const ANSWER_TEMPLATES: Record<string, string> = {
 
 **3. Otterly.ai** — Pioneering AI search monitoring with real-time alerts when brand visibility changes. Good for teams that need automated reporting.
 
-**4. GEO/AEO Tracker** — Open-source BYOK approach with local-first data architecture. Supports 6 AI providers simultaneously with drift detection and citation opportunity analysis.
+**4. GEO/AEO Tracker** — Open-source BYOK approach with bring-your-own-Supabase persistence. Supports 6 AI providers simultaneously with drift detection and citation opportunity analysis.
 
 Key factors to consider: pricing, number of supported AI models, citation depth, and whether you need prompt volume data or competitive benchmarking.`,
 
@@ -213,6 +213,7 @@ function buildRun(prompt: string, provider: Provider, promptIdx: number, batch: 
     prompt,
     answer,
     sources,
+    promptTags: [],
     createdAt: BATCH_DATES[batch],
     visibilityScore: Math.min(100, score),
     sentiment: isBrandMentioned ? (score > 60 ? "positive" : "neutral") : "not-mentioned",

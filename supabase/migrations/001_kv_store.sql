@@ -1,6 +1,7 @@
 -- geo-aeo-tracker key-value store
--- Mirrors the IndexedDB key-value model used by lib/client/sovereign-store.ts
--- so existing save/load call sites don't need to change.
+-- Backs the /api/state route (lib/server/kv-store.ts). Stores per-workspace
+-- settings blobs and the workspace list as JSON; runs live in their own table
+-- (see 002_runs.sql).
 --
 -- This table is written to by the Next.js API route (/api/state) using the
 -- Supabase service-role key on the server. The anon key is never used by

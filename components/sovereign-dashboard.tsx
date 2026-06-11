@@ -326,10 +326,17 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
     }
   }, [applyTheme]);
 
+  /** Which workspace's state has finished loading. The autosave effect must
+      not persist anything for a workspace that hasn't hydrated yet — otherwise
+      defaultState races the async load and overwrites real data (worst with
+      cloud sync, where load and save are both network calls). */
+  const hydratedWsRef = useRef<string | null>(null);
+
   /** Load app state for active workspace */
   useEffect(() => {
     if (demoMode || !activeWsId) return;
     let mounted = true;
+    hydratedWsRef.current = null;
     const key = storageKeyForWorkspace(activeWsId);
     loadSovereignValue<AppState>(key, defaultState).then((data) => {
       if (mounted) {
@@ -369,6 +376,7 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
         if (merged.activeProviders.length === 0) {
           merged.activeProviders = [merged.provider];
         }
+        hydratedWsRef.current = activeWsId;
         setState(merged);
       }
     });
@@ -379,6 +387,8 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
 
   useEffect(() => {
     if (demoMode || !activeWsId) return;
+    // Don't save until this workspace's state has actually loaded
+    if (hydratedWsRef.current !== activeWsId) return;
     saveSovereignValue(storageKeyForWorkspace(activeWsId), state);
     // Update workspace brandName if changed
     if (state.brand.brandName) {

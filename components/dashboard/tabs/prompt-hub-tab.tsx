@@ -9,7 +9,7 @@ type PromptHubTabProps = {
   onAddCustomPrompt: (value: string) => void;
   onRemoveCustomPrompt: (value: string, deleteResponses?: boolean) => void;
   onUpdatePromptTags: (text: string, tags: string[]) => void;
-  onRunPrompt: (prompt: string) => void;
+  onRunPrompt: (prompt: string, tags?: string[]) => void;
   onBatchRunAll: () => void;
 };
 
@@ -178,7 +178,7 @@ export function PromptHubTab({
 
               <div className="flex gap-2">
                 <button
-                  onClick={() => onRunPrompt(interpolateBrand(item.text))}
+                  onClick={() => onRunPrompt(interpolateBrand(item.text), item.tags)}
                   className="bd-btn-primary rounded-md px-3 py-1.5 text-xs"
                 >
                   Run

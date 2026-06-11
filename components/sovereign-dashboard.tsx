@@ -8,7 +8,11 @@ import {
   deleteRunsForWorkspace as apiDeleteRunsForWorkspace,
   fetchRuns,
   persistRuns,
+  analyzeRuns,
+  fetchAnalyses,
+  type RunAnalysis,
 } from "@/lib/client/runs-api";
+import type { JudgeVerdict } from "@/lib/server/openrouter-judge";
 import { DEMO_STATE } from "@/lib/demo-data";
 import { AeoAuditTab } from "@/components/dashboard/tabs/aeo-audit-tab";
 import { AutomationTab } from "@/components/dashboard/tabs/automation-tab-v2";
@@ -20,6 +24,7 @@ import { PartnerDiscoveryTab } from "@/components/dashboard/tabs/partner-discove
 import { ProjectSettingsTab } from "@/components/dashboard/tabs/project-settings-tab";
 import { PromptHubTab } from "@/components/dashboard/tabs/prompt-hub-tab";
 import { ReputationSourcesTab } from "@/components/dashboard/tabs/reputation-sources-tab";
+import { BrandReputationTab } from "@/components/dashboard/tabs/brand-reputation-tab";
 import { VisibilityAnalyticsTab } from "@/components/dashboard/tabs/visibility-analytics-tab";
 import { DocumentationTab } from "@/components/dashboard/tabs/documentation-tab";
 import { SROAnalysisTab } from "@/components/dashboard/tabs/sro-analysis-tab";
@@ -89,6 +94,12 @@ const tabIcons: Record<TabKey, ReactNode> = {
     <Icon>
       <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
       <path d="M8 9h8M8 13h6" />
+    </Icon>
+  ),
+  "Brand Reputation": (
+    <Icon>
+      <polyline points="3 17 9 11 13 15 21 7" />
+      <polyline points="15 7 21 7 21 13" />
     </Icon>
   ),
   "Visibility Analytics": (
@@ -234,6 +245,12 @@ const tabMeta: Record<TabKey, { title: string; tooltip: string; details: string 
     details:
       "Browse all collected AI responses. Brand and competitor mentions are highlighted in-context. View visibility scores, sentiment, and cited sources per response.",
   },
+  "Brand Reputation": {
+    title: "Reputation",
+    tooltip: "LLM-judge reputation score over time.",
+    details:
+      "Track how AI assistants portray your brand over time, scored by an LLM judge on a fixed rubric. One series per model, current snapshot with deltas, and recurring criticisms / negative sources.",
+  },
   "Visibility Analytics": {
     title: "Analytics",
     tooltip: "Track visibility score and sentiment trends over time.",
@@ -283,6 +300,17 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
   const [showWsPicker, setShowWsPicker] = useState(false);
   const [showScoreInfo, setShowScoreInfo] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+
+  /** LLM-judge verdicts by run id. Filled by the manual button and the auto-trigger. */
+  const [verdicts, setVerdicts] = useState<Record<string, JudgeVerdict>>({});
+  const mergeVerdicts = useCallback((analyses: RunAnalysis[]) => {
+    if (analyses.length === 0) return;
+    setVerdicts((prev) => {
+      const next = { ...prev };
+      for (const a of analyses) next[a.run_id] = a.verdict;
+      return next;
+    });
+  }, []);
 
   /** Apply theme class to <html> */
   const applyTheme = useCallback((t: "light" | "dark" | "system") => {
@@ -461,8 +489,45 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
   const activeWsIdRef = useRef(activeWsId);
   activeWsIdRef.current = activeWsId;
 
+  /**
+   * Fire-and-forget: score freshly persisted runs with the LLM judge in the
+   * background, then merge the verdicts into shared state. Non-blocking — the UI
+   * already shows the runs; verdict pills fill in when ready. Idless (unsaved)
+   * runs are skipped, so a failed persist simply means no auto-judge.
+   */
+  const autoJudge = useCallback(
+    async (saved: ScrapeRun[]) => {
+      if (demoMode) return;
+      const ids = saved.map((r) => r.id).filter((id): id is string => Boolean(id));
+      if (ids.length === 0) return;
+      try {
+        mergeVerdicts(await analyzeRuns(activeWsIdRef.current, ids));
+      } catch {
+        // Background scoring failed; the manual "Launch the judge" button remains.
+      }
+    },
+    [demoMode, mergeVerdicts],
+  );
+
+  /** Hydrate saved verdicts for the active workspace (pills in Responses + the chart). */
+  useEffect(() => {
+    if (demoMode || !activeWsId) return;
+    let active = true;
+    fetchAnalyses(activeWsId)
+      .then((analyses) => {
+        if (!active) return;
+        const map: Record<string, JudgeVerdict> = {};
+        for (const a of analyses) map[a.run_id] = a.verdict; // asc by created_at → latest wins
+        setVerdicts(map);
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [activeWsId, demoMode]);
+
   /** ref to latest callScrapeOne so the scheduler callback doesn't use stale brand terms */
-  const callScrapeOneRef = useRef<(prompt: string, provider: Provider) => Promise<ScrapeRun | null>>(
+  const callScrapeOneRef = useRef<(prompt: string, provider: Provider, tags?: string[]) => Promise<ScrapeRun | null>>(
     // placeholder — will be assigned after callScrapeOne is defined
     async () => null,
   );
@@ -500,7 +565,9 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
   const runScheduledBatch = useCallback(async () => {
     const s = stateRef.current;
     if (busyRef.current) return; // skip if already running
-    const prompts = s.customPrompts.length > 0 ? s.customPrompts.map((p) => p.text) : [s.prompt];
+    const prompts = s.customPrompts.length > 0
+      ? s.customPrompts.map((p) => ({ text: p.text, tags: p.tags }))
+      : [{ text: s.prompt, tags: [] as string[] }];
     const providers = s.activeProviders;
     if (prompts.length === 0 || providers.length === 0) return;
 
@@ -508,9 +575,9 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
     setMessage("Auto-run: Starting scheduled batch…");
 
     const allRuns: ScrapeRun[] = [];
-    for (const prompt of prompts) {
+    for (const { text, tags } of prompts) {
       const results = await Promise.allSettled(
-        providers.map((p) => callScrapeOneRef.current(prompt, p)),
+        providers.map((p) => callScrapeOneRef.current(text, p, tags)),
       );
       for (const r of results) {
         if (r.status === "fulfilled" && r.value) allRuns.push(r.value);
@@ -534,11 +601,13 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
       driftAlerts: [...newAlerts, ...prev.driftAlerts].slice(0, 100),
     }));
 
+    void autoJudge(saved); // background: score the new runs
+
     setMessage(
       `Auto-run complete: ${allRuns.length} results.${newAlerts.length > 0 ? ` ${newAlerts.length} drift alert${newAlerts.length > 1 ? "s" : ""} triggered.` : ""}`,
     );
     setBusy(false);
-  }, []);
+  }, [autoJudge]);
 
   /** Set up / tear down the scheduler interval */
   useEffect(() => {
@@ -866,7 +935,7 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
   }
 
   /** Run a single scrape against one specific provider */
-  async function callScrapeOne(prompt: string, provider: Provider): Promise<ScrapeRun | null> {
+  async function callScrapeOne(prompt: string, provider: Provider, tags: string[] = []): Promise<ScrapeRun | null> {
     if (demoMode) { setMessage("Demo mode — API calls are disabled"); return null; }
     try {
       const response = await fetch("/api/scrape", {
@@ -892,6 +961,7 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
         prompt: data.prompt,
         answer: answerText,
         sources: sourceList,
+        promptTags: tags,
         createdAt: data.createdAt || new Date().toISOString(),
         visibilityScore: calcVisibilityScore(answerText, sourceList, brandTerms),
         sentiment: detectSentiment(answerText, brandTerms),
@@ -907,7 +977,7 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
   callScrapeOneRef.current = callScrapeOne;
 
   /** Run a prompt across all activeProviders in parallel */
-  async function callScrape(prompt: string) {
+  async function callScrape(prompt: string, tags: string[] = []) {
     const providers = state.activeProviders.length > 0
       ? state.activeProviders
       : [state.provider];
@@ -917,7 +987,7 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
 
     try {
       const results = await Promise.allSettled(
-        providers.map((p) => callScrapeOne(prompt, p)),
+        providers.map((p) => callScrapeOne(prompt, p, tags)),
       );
 
       const runs: ScrapeRun[] = results
@@ -942,6 +1012,8 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
         runs: [...saved, ...prev.runs],
       }));
 
+      void autoJudge(saved); // background: score the new runs
+
       const failed = count - runs.length;
       setMessage(
         persistFailed
@@ -957,9 +1029,10 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
 
   /** Batch run all custom prompts across all active providers — fully parallel */
   async function batchRunAllPrompts() {
-    const prompts = state.customPrompts.map((p) =>
-      p.text.replace(/\{brand\}/gi, state.brand.brandName || "our brand"),
-    );
+    const prompts = state.customPrompts.map((p) => ({
+      text: p.text.replace(/\{brand\}/gi, state.brand.brandName || "our brand"),
+      tags: p.tags,
+    }));
     if (prompts.length === 0) {
       setMessage("No tracking prompts to run. Add prompts first.");
       return;
@@ -972,8 +1045,8 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
     setMessage(`Batch: launching ${totalJobs} jobs in parallel...`);
 
     // Fire ALL prompt × provider combinations at once
-    const jobs = prompts.flatMap((prompt) =>
-      providers.map((p) => callScrapeOne(prompt, p)),
+    const jobs = prompts.flatMap(({ text, tags }) =>
+      providers.map((p) => callScrapeOne(text, p, tags)),
     );
     const results = await Promise.allSettled(jobs);
 
@@ -999,6 +1072,8 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
       ...prev,
       runs: [...saved, ...prev.runs],
     }));
+
+    void autoJudge(saved); // background: score the new runs
 
     setMessage(
       persistFailed
@@ -1441,6 +1516,19 @@ Now analyze all ${competitorList.length} competitors:`,
           competitorTerms={getCompetitorTerms()}
           runDeltas={runDeltas}
           onDeleteRun={deleteRun}
+          workspace={activeWsId}
+          verdicts={verdicts}
+          onVerdicts={mergeVerdicts}
+        />
+      );
+    }
+
+    if (activeTab === "Brand Reputation") {
+      return (
+        <BrandReputationTab
+          runs={state.runs}
+          verdicts={verdicts}
+          brandTerms={getBrandTerms()}
         />
       );
     }

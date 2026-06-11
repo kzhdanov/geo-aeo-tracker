@@ -13,6 +13,7 @@ export type RunRow = {
   prompt: string;
   answer: string;
   sources: string[];
+  prompt_tags: string[];
   visibility_score: number | null;
   sentiment: string | null;
   brand_mentions: string[] | null;
@@ -39,6 +40,25 @@ export async function listRuns(
     .eq("workspace", workspace)
     .order("created_at", { ascending: false })
     .range(offset, offset + limit - 1);
+
+  if (error) return { ok: false, error: error.message };
+  return { ok: true, value: (data ?? []) as RunRow[] };
+}
+
+/** Fetch specific runs by id, scoped to a workspace so ids can't be probed cross-workspace. */
+export async function getRunsByIds(
+  workspace: string,
+  ids: string[],
+): Promise<RunsResult<RunRow[]>> {
+  const supabase = getServerSupabase();
+  if (!supabase) return { ok: false, error: "cloud-not-configured" };
+  if (ids.length === 0) return { ok: true, value: [] };
+
+  const { data, error } = await supabase
+    .from("runs")
+    .select("*")
+    .eq("workspace", workspace)
+    .in("id", ids);
 
   if (error) return { ok: false, error: error.message };
   return { ok: true, value: (data ?? []) as RunRow[] };

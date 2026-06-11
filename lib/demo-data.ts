@@ -213,6 +213,7 @@ function buildRun(prompt: string, provider: Provider, promptIdx: number, batch: 
     prompt,
     answer,
     sources,
+    promptTags: [],
     createdAt: BATCH_DATES[batch],
     visibilityScore: Math.min(100, score),
     sentiment: isBrandMentioned ? (score > 60 ? "positive" : "neutral") : "not-mentioned",

@@ -1,7 +1,14 @@
-import { useMemo, useState } from "react";
+import { useMemo, useState, useCallback } from "react";
 import type { ScrapeRun } from "@/components/dashboard/types";
 import { ALL_PROVIDERS, PROVIDER_LABELS, type Provider } from "@/components/dashboard/types";
 import type { RunDelta } from "@/components/dashboard/types";
+import { analyzeRun, type RunAnalysis } from "@/lib/client/runs-api";
+import { scoreColor, headlineScore, shortHost } from "@/components/dashboard/verdict-utils";
+import type {
+  JudgeVerdict,
+  BrandEntityVerdict,
+  DiscoveryEntityVerdict,
+} from "@/lib/server/openrouter-judge";
 
 type ReputationSourcesTabProps = {
   runs: ScrapeRun[];
@@ -9,6 +16,12 @@ type ReputationSourcesTabProps = {
   competitorTerms: string[];
   runDeltas?: RunDelta[];
   onDeleteRun?: (index: number) => void;
+  /** Active workspace id — needed to judge runs (POST /api/analyze-runs). */
+  workspace?: string;
+  /** Verdicts by run id, owned by the dashboard (manual clicks + auto-trigger share it). */
+  verdicts?: Record<string, JudgeVerdict>;
+  /** Report freshly judged verdicts up so the shared map updates. */
+  onVerdicts?: (analyses: RunAnalysis[]) => void;
 };
 
 function normalizeAnswerForDisplay(answer: string): string {
@@ -160,12 +173,20 @@ function ModelResponseCard({
   competitorTerms,
   delta,
   onDelete,
+  verdict,
+  isJudging,
+  judgeError,
+  onJudge,
 }: {
   run: ScrapeRun;
   brandTerms: string[];
   competitorTerms: string[];
   delta?: number | null;
   onDelete?: () => void;
+  verdict?: JudgeVerdict;
+  isJudging: boolean;
+  judgeError?: string;
+  onJudge: () => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const rawDisplay = normalizeAnswerForDisplay(run.answer ?? "");
@@ -181,37 +202,57 @@ function ModelResponseCard({
   return (
     <div className="group relative rounded-lg border border-th-border bg-th-card">
       {/* Header */}
-      <button
-        onClick={() => setExpanded(!expanded)}
-        className="flex w-full items-center gap-3 px-4 py-3 text-left hover:bg-th-card-hover"
-      >
-        <ProviderBadge provider={run.provider} />
-        <div className="flex flex-1 items-center gap-3">
-          <span className="text-xs text-th-text-muted">
-            Score: <span className="font-semibold text-th-text">{run.visibilityScore}</span>/100
-          </span>
-          {delta != null && delta !== 0 && (
-            <span className={`inline-flex items-center gap-0.5 rounded-full px-1.5 py-0.5 text-xs font-bold ${
-              delta > 0 ? "bg-th-success-soft text-th-success" : "bg-th-danger-soft text-th-danger"
-            }`}>
-              {delta > 0 ? "↑" : "↓"}{Math.abs(delta)}
-            </span>
-          )}
-          <SentimentBadge sentiment={run.sentiment ?? "neutral"} />
-          {run.brandMentions?.length > 0 && (
-            <span className="text-xs text-th-brand-text">
-              {run.brandMentions.length} brand mention{run.brandMentions.length > 1 ? "s" : ""}
-            </span>
-          )}
-          {uniqueSources.length > 0 && (
+      <div className="flex items-center">
+        <button
+          onClick={() => setExpanded(!expanded)}
+          className="flex min-w-0 flex-1 items-center gap-3 px-4 py-3 text-left hover:bg-th-card-hover"
+        >
+          <ProviderBadge provider={run.provider} />
+          <div className="flex min-w-0 flex-1 items-center gap-3">
             <span className="text-xs text-th-text-muted">
-              {uniqueSources.length} source{uniqueSources.length > 1 ? "s" : ""}
+              Score: <span className="font-semibold text-th-text">{run.visibilityScore}</span>/100
             </span>
-          )}
+            {delta != null && delta !== 0 && (
+              <span className={`inline-flex items-center gap-0.5 rounded-full px-1.5 py-0.5 text-xs font-bold ${
+                delta > 0 ? "bg-th-success-soft text-th-success" : "bg-th-danger-soft text-th-danger"
+              }`}>
+                {delta > 0 ? "↑" : "↓"}{Math.abs(delta)}
+              </span>
+            )}
+            <SentimentBadge sentiment={run.sentiment ?? "neutral"} />
+            {run.brandMentions?.length > 0 && (
+              <span className="text-xs text-th-brand-text">
+                {run.brandMentions.length} brand mention{run.brandMentions.length > 1 ? "s" : ""}
+              </span>
+            )}
+            {uniqueSources.length > 0 && (
+              <span className="text-xs text-th-text-muted">
+                {uniqueSources.length} source{uniqueSources.length > 1 ? "s" : ""}
+              </span>
+            )}
+          </div>
+        </button>
+        {/* Right action cluster — outside the toggle button so it can host the judge button */}
+        <div className="flex shrink-0 items-center gap-2 pl-2 pr-9">
+          <JudgeControl
+            hasId={Boolean(run.id)}
+            verdict={verdict}
+            isJudging={isJudging}
+            error={judgeError}
+            brandTerms={brandTerms}
+            onJudge={onJudge}
+          />
+          <span className="text-xs text-th-text-muted">{run.createdAt.slice(0, 10)}</span>
+          <button
+            type="button"
+            onClick={() => setExpanded(!expanded)}
+            className="text-xs text-th-text-muted hover:text-th-text"
+            aria-label={expanded ? "Collapse" : "Expand"}
+          >
+            {expanded ? "▲" : "▼"}
+          </button>
         </div>
-        <span className="text-xs text-th-text-muted">{run.createdAt.slice(0, 10)}</span>
-        <span className="text-xs text-th-text-muted">{expanded ? "▲" : "▼"}</span>
-      </button>
+      </div>
       {onDelete && (
         <button
           onClick={(e) => {
@@ -243,6 +284,13 @@ function ModelResponseCard({
       {/* Full content when expanded */}
       {expanded && (
         <div className="space-y-3 border-t border-th-border px-4 py-3">
+          {judgeError && (
+            <div className="rounded-md border border-th-danger/40 bg-th-danger-soft px-3 py-2 text-xs text-th-danger">
+              Judge failed: {judgeError}
+            </div>
+          )}
+          {verdict && <JudgeVerdictPanel verdict={verdict} brandTerms={brandTerms} />}
+
           {/* Highlight legend */}
           {(brandTerms.length > 0 || competitorTerms.length > 0) && (
             <div className="flex items-center gap-3 text-xs text-th-text-muted">
@@ -306,11 +354,37 @@ export function ReputationSourcesTab({
   competitorTerms,
   runDeltas = [],
   onDeleteRun,
+  workspace,
+  verdicts = {},
+  onVerdicts,
 }: ReputationSourcesTabProps) {
   const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({});
   const [filterProvider, setFilterProvider] = useState<Provider | "all">("all");
   const [filterSentiment, setFilterSentiment] = useState<string>("all");
   const [sortField, setSortField] = useState<"date" | "score">("date");
+
+  // Verdicts are owned by the dashboard (shared with the auto-trigger). Only the
+  // transient per-run UI state lives here.
+  const [judging, setJudging] = useState<Record<string, boolean>>({});
+  const [judgeErrors, setJudgeErrors] = useState<Record<string, string>>({});
+
+  const handleJudge = useCallback(
+    async (run: ScrapeRun) => {
+      if (!run.id || !workspace) return; // unsaved/demo runs can't be judged
+      const id = run.id;
+      setJudging((p) => ({ ...p, [id]: true }));
+      setJudgeErrors((p) => ({ ...p, [id]: "" }));
+      try {
+        const analysis = await analyzeRun(workspace, id);
+        onVerdicts?.([analysis]);
+      } catch (e) {
+        setJudgeErrors((p) => ({ ...p, [id]: e instanceof Error ? e.message : String(e) }));
+      } finally {
+        setJudging((p) => ({ ...p, [id]: false }));
+      }
+    },
+    [workspace, onVerdicts],
+  );
 
   // Apply filters
   const filteredRuns = useMemo(() => {
@@ -563,6 +637,10 @@ export function ReputationSourcesTab({
                       brandTerms={brandTerms}
                       competitorTerms={competitorTerms}
                       delta={deltaMap.get(`${run.prompt}|||${run.provider}`) ?? null}
+                      verdict={run.id ? verdicts[run.id] : undefined}
+                      isJudging={run.id ? Boolean(judging[run.id]) : false}
+                      judgeError={run.id ? judgeErrors[run.id] : undefined}
+                      onJudge={() => handleJudge(run)}
                       onDelete={onDeleteRun ? () => {
                         const origIdx = runs.indexOf(run);
                         if (origIdx !== -1) onDeleteRun(origIdx);
@@ -600,6 +678,214 @@ function InsightMini({
         {value}
         {sub && <span className="ml-1 text-xs font-normal text-th-text-muted">{sub}</span>}
       </div>
+    </div>
+  );
+}
+
+/* ── LLM-judge controls ── */
+
+function Spinner() {
+  return (
+    <svg className="h-3 w-3 animate-spin text-th-text-accent" viewBox="0 0 24 24" fill="none">
+      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.4 0 0 5.4 0 12h4z" />
+    </svg>
+  );
+}
+
+/** Button near the timestamp: launches the judge, spins while running, then shows the score. */
+function JudgeControl({
+  hasId,
+  verdict,
+  isJudging,
+  error,
+  brandTerms,
+  onJudge,
+}: {
+  hasId: boolean;
+  verdict?: JudgeVerdict;
+  isJudging: boolean;
+  error?: string;
+  brandTerms: string[];
+  onJudge: () => void;
+}) {
+  if (!hasId) return null; // demo / unsaved runs have no DB id to judge
+
+  if (isJudging) {
+    return (
+      <span className="inline-flex items-center gap-1.5 rounded-full border border-th-border bg-th-card-alt px-2.5 py-1 text-xs text-th-text-muted">
+        <Spinner /> Judging…
+      </span>
+    );
+  }
+
+  if (error) {
+    return (
+      <button
+        type="button"
+        onClick={onJudge}
+        title={error}
+        className="inline-flex items-center gap-1 rounded-full border border-th-danger/40 bg-th-danger-soft px-2.5 py-1 text-xs font-medium text-th-danger hover:opacity-80"
+      >
+        ⚠ Retry judge
+      </button>
+    );
+  }
+
+  if (verdict) {
+    const score = headlineScore(verdict, brandTerms);
+    return (
+      <button
+        type="button"
+        onClick={onJudge}
+        title="Re-run the judge (adds a new verdict)"
+        className="inline-flex items-center gap-1.5 rounded-full border border-th-border bg-th-card px-2.5 py-1 text-xs hover:bg-th-card-hover"
+      >
+        <span>⚖</span>
+        <span className={`font-semibold ${scoreColor(score)}`}>{score}</span>
+        <span className="text-th-text-muted">· {verdict.rubric} ↻</span>
+      </button>
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={onJudge}
+      title="Score this answer with the LLM judge"
+      className="inline-flex items-center gap-1.5 rounded-full border border-th-accent/40 bg-th-accent-soft px-2.5 py-1 text-xs font-medium text-th-text-accent hover:opacity-80"
+    >
+      <span>⚖</span> Launch the judge
+    </button>
+  );
+}
+
+function LabelChip({ text }: { text: string }) {
+  return (
+    <span className="rounded-full border border-th-border bg-th-card-alt px-2 py-0.5 text-[10px] font-medium uppercase text-th-text-secondary">
+      {text.replace(/_/g, " ")}
+    </span>
+  );
+}
+
+/** Full verdict, shown inside the expanded card next to the raw answer. */
+function JudgeVerdictPanel({
+  verdict,
+  brandTerms,
+}: {
+  verdict: JudgeVerdict;
+  brandTerms: string[];
+}) {
+  const terms = brandTerms.map((t) => t.toLowerCase());
+  // Only entities with signal: mentioned (brand) / present (discovery). Keeps the
+  // not-mentioned competitors from cluttering the panel.
+  const shown = Object.entries(verdict.entities)
+    .filter(([, e]) =>
+      verdict.rubric === "brand"
+        ? (e as BrandEntityVerdict).mentioned
+        : (e as DiscoveryEntityVerdict).presence !== "not_mentioned",
+    )
+    .sort((a, b) => (b[1].score ?? 0) - (a[1].score ?? 0));
+
+  return (
+    <div className="space-y-3 rounded-lg border border-th-accent/30 bg-th-accent-soft/40 p-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-xs font-semibold uppercase tracking-wider text-th-text-accent">⚖ Judge verdict</span>
+        <span className="rounded-full border border-th-border bg-th-card px-2 py-0.5 text-[10px] uppercase text-th-text-muted">
+          {verdict.rubric}
+        </span>
+        <span className="text-[10px] text-th-text-muted">separate scale from the heuristic Score above</span>
+      </div>
+
+      {verdict.summary && (
+        <p className="text-sm leading-relaxed text-th-text-secondary">{verdict.summary}</p>
+      )}
+
+      {shown.length === 0 ? (
+        <p className="text-xs italic text-th-text-muted">No tracked entity was mentioned in this answer.</p>
+      ) : (
+        <div className="space-y-2.5">
+          {shown.map(([name, entity]) => (
+            <EntityVerdictRow
+              key={name}
+              name={name}
+              entity={entity}
+              rubric={verdict.rubric}
+              isBrand={terms.includes(name.toLowerCase())}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function EntityVerdictRow({
+  name,
+  entity,
+  rubric,
+  isBrand,
+}: {
+  name: string;
+  entity: BrandEntityVerdict | DiscoveryEntityVerdict;
+  rubric: JudgeVerdict["rubric"];
+  isBrand: boolean;
+}) {
+  const score = entity.score ?? 0;
+  return (
+    <div className="rounded-md border border-th-border bg-th-card p-2.5">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-sm font-semibold text-th-text">{name}</span>
+        {isBrand && (
+          <span className="rounded-full bg-th-brand-bg px-1.5 py-0.5 text-[10px] font-medium text-th-brand-text">
+            Your brand
+          </span>
+        )}
+        <span className={`text-sm font-bold ${scoreColor(score)}`}>{score}</span>
+        <span className="text-xs text-th-text-muted">/100</span>
+        {rubric === "brand" ? (
+          <>
+            <LabelChip text={(entity as BrandEntityVerdict).verdict} />
+            <LabelChip text={entity.sentiment} />
+          </>
+        ) : (
+          <>
+            <LabelChip text={(entity as DiscoveryEntityVerdict).presence} />
+            <LabelChip text={(entity as DiscoveryEntityVerdict).rank} />
+            <LabelChip text={entity.sentiment} />
+          </>
+        )}
+      </div>
+
+      {entity.claims_positive.length > 0 && (
+        <div className="mt-1.5 flex flex-wrap gap-1">
+          {entity.claims_positive.map((c, i) => (
+            <span key={i} className="rounded bg-th-success-soft px-1.5 py-0.5 text-[11px] text-th-success">
+              + {c}
+            </span>
+          ))}
+        </div>
+      )}
+      {entity.claims_negative.length > 0 && (
+        <div className="mt-1 flex flex-wrap gap-1">
+          {entity.claims_negative.map((c, i) => (
+            <span key={i} className="rounded bg-th-danger-soft px-1.5 py-0.5 text-[11px] text-th-danger">
+              − {c}
+            </span>
+          ))}
+        </div>
+      )}
+      {entity.negative_sources.length > 0 && (
+        <div className="mt-1.5 text-[11px]">
+          <span className="uppercase tracking-wider text-th-text-muted">Negative sources: </span>
+          {entity.negative_sources.map((s, i) => (
+            <a key={i} href={s} target="_blank" rel="noreferrer" className="mr-1.5 text-th-danger underline">
+              {shortHost(s)}
+            </a>
+          ))}
+        </div>
+      )}
+      {entity.rationale && <p className="mt-1.5 text-xs italic text-th-text-muted">{entity.rationale}</p>}
     </div>
   );
 }

@@ -15,8 +15,8 @@ const sections: DocSection[] = [
     title: "Overview",
     icon: "📖",
     content: [
-      "The GEO/AEO Tracker is a local-first, open-source intelligence dashboard that monitors how your brand appears across AI models — ChatGPT, Perplexity, Gemini, Copilot, Google AI, and Grok.",
-      "All data is stored in your browser (localStorage + IndexedDB). Nothing leaves your machine unless you explicitly trigger a scrape or analysis via the configured API.",
+      "The GEO/AEO Tracker is an open-source intelligence dashboard that monitors how your brand appears across AI models — ChatGPT, Perplexity, Gemini, Copilot, Google AI, and Grok.",
+      "All workspace data is stored in your own Supabase project (the `kv_store` and `runs` tables) via the app's API routes. Only small device preferences — theme and the active-workspace pointer — stay in your browser's localStorage.",
       "Key capabilities: multi-model brand tracking, visibility scoring, sentiment analysis, citation discovery, competitor battlecards, AEO site audits, and automation templates.",
     ],
   },
@@ -158,7 +158,7 @@ const sections: DocSection[] = [
       "Create separate workspaces for each brand or client you track.",
       "Each workspace has its own settings, prompts, runs, and data — fully isolated.",
       "Switch between workspaces instantly via the sidebar brand picker.",
-      "All workspace data is stored locally in your browser.",
+      "Each workspace's data is stored in your own Supabase project, fully isolated from the others.",
     ],
   },
   {
@@ -195,8 +195,8 @@ const sections: DocSection[] = [
     title: "Data & Privacy",
     icon: "🔒",
     content: [
-      "All data is stored locally in your browser using localStorage and IndexedDB.",
-      "No data is sent to any server except when you explicitly run a scrape (via Bright Data API) or an analysis (via your configured LLM API).",
+      "All workspace data lives in the Supabase project you own and configure — there is no shared backend, so your data is never sent to a third-party server. Only device preferences (theme, active workspace) remain in browser localStorage.",
+      "Data is additionally sent out only when you explicitly run a scrape or an analysis via the APIs you configure.",
       "You can export all data as CSV from the Analytics tab.",
       "Use the Reset Data button in Project Settings to permanently delete all stored data for the active workspace.",
       "BYOK (Bring Your Own Key) architecture — you provide your own API keys.",

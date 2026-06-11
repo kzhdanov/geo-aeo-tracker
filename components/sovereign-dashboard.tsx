@@ -2,6 +2,13 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { loadSovereignValue, saveSovereignValue, clearSovereignStore } from "@/lib/client/sovereign-store";
+import {
+  deleteRun as apiDeleteRun,
+  deleteRunsByPrompt as apiDeleteRunsByPrompt,
+  deleteRunsForWorkspace as apiDeleteRunsForWorkspace,
+  fetchRuns,
+  persistRuns,
+} from "@/lib/client/runs-api";
 import { DEMO_STATE } from "@/lib/demo-data";
 import { AeoAuditTab } from "@/components/dashboard/tabs/aeo-audit-tab";
 import { AutomationTab } from "@/components/dashboard/tabs/automation-tab-v2";
@@ -132,6 +139,13 @@ const THEME_KEY = "sovereign-theme";
 
 function storageKeyForWorkspace(wsId: string) {
   return wsId === "default" ? STORAGE_KEY : `sovereign-aeo-tracker-${wsId}`;
+}
+
+/** Persist everything except runs — runs live as rows in the `runs` table, not in the settings blob */
+function saveSettingsBlob(wsId: string, s: AppState): Promise<void> {
+  const settings: Partial<AppState> = { ...s };
+  delete settings.runs;
+  return saveSovereignValue(storageKeyForWorkspace(wsId), settings);
 }
 
 function generateId() {
@@ -306,24 +320,38 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
 
     if (demoMode) return; // Skip workspace loading in demo mode
 
-    // Workspaces
-    try {
-      const raw = localStorage.getItem(WORKSPACES_KEY);
-      const parsed: Workspace[] = raw ? JSON.parse(raw) : [];
-      if (parsed.length === 0) {
-        // Create default workspace
-        const defaultWs: Workspace = { id: "default", brandName: "Default", createdAt: new Date().toISOString() };
-        parsed.push(defaultWs);
-        localStorage.setItem(WORKSPACES_KEY, JSON.stringify(parsed));
-      }
-      setWorkspaces(parsed);
-      const savedActiveId = localStorage.getItem(ACTIVE_WS_KEY) ?? parsed[0].id;
-      setActiveWsId(savedActiveId);
-    } catch {
-      const defaultWs: Workspace = { id: "default", brandName: "Default", createdAt: new Date().toISOString() };
-      setWorkspaces([defaultWs]);
-      setActiveWsId("default");
-    }
+    // Workspaces — list lives in the cloud KV so it follows you across devices.
+    // The active-workspace pointer and theme stay in localStorage (device prefs).
+    let mounted = true;
+    loadSovereignValue<Workspace[]>(WORKSPACES_KEY, [])
+      .then((stored) => {
+        if (!mounted) return;
+        let list = Array.isArray(stored) ? stored : [];
+        const needsSeed = list.length === 0;
+        if (needsSeed) {
+          // Legacy lift: pre-v1.3 versions kept the list in localStorage
+          try {
+            const raw = localStorage.getItem(WORKSPACES_KEY);
+            if (raw) list = JSON.parse(raw) as Workspace[];
+          } catch { /* ignore */ }
+        }
+        if (list.length === 0) {
+          list = [{ id: "default", brandName: "Default", createdAt: new Date().toISOString() }];
+        }
+        if (needsSeed) saveSovereignValue(WORKSPACES_KEY, list).catch(() => {});
+        setWorkspaces(list);
+        const savedActiveId = localStorage.getItem(ACTIVE_WS_KEY);
+        setActiveWsId(list.some((ws) => ws.id === savedActiveId) ? (savedActiveId as string) : list[0].id);
+      })
+      .catch(() => {
+        if (!mounted) return;
+        setWorkspaces([{ id: "default", brandName: "Default", createdAt: new Date().toISOString() }]);
+        setActiveWsId("default");
+        setMessage("Cloud unavailable — check Supabase config and reload.");
+      });
+    return () => {
+      mounted = false;
+    };
   }, [applyTheme]);
 
   /** Which workspace's state has finished loading. The autosave effect must
@@ -338,7 +366,10 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
     let mounted = true;
     hydratedWsRef.current = null;
     const key = storageKeyForWorkspace(activeWsId);
-    loadSovereignValue<AppState>(key, defaultState).then((data) => {
+    Promise.all([
+      loadSovereignValue<AppState>(key, defaultState),
+      fetchRuns(activeWsId),
+    ]).then(async ([data, cloudRuns]) => {
       if (mounted) {
         // Merge saved state with defaults so new fields are never undefined
         const merged: AppState = {
@@ -376,9 +407,22 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
         if (merged.activeProviders.length === 0) {
           merged.activeProviders = [merged.provider];
         }
+        // One-time lift: v1.2 blobs carry runs inline. Move them into the
+        // runs table before autosave starts stripping runs from the blob.
+        let runs = cloudRuns;
+        if (runs.length === 0 && Array.isArray(data.runs) && data.runs.length > 0) {
+          runs = await persistRuns(activeWsId, data.runs);
+          setMessage(`Migrated ${runs.length} runs into the cloud runs table.`);
+        }
+        merged.runs = runs;
+        if (!mounted) return;
         hydratedWsRef.current = activeWsId;
         setState(merged);
       }
+    }).catch((err) => {
+      if (!mounted) return;
+      console.error("[dashboard] cloud load failed:", err);
+      setMessage("Cloud load failed — check Supabase config (is migration 002 applied?). Saving is paused.");
     });
     return () => {
       mounted = false;
@@ -389,14 +433,18 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
     if (demoMode || !activeWsId) return;
     // Don't save until this workspace's state has actually loaded
     if (hydratedWsRef.current !== activeWsId) return;
-    saveSovereignValue(storageKeyForWorkspace(activeWsId), state);
+    saveSettingsBlob(activeWsId, state).catch(() => {
+      setMessage("Cloud save failed — recent changes may be lost on reload.");
+    });
     // Update workspace brandName if changed
     if (state.brand.brandName) {
       setWorkspaces((prev) => {
+        const current = prev.find((ws) => ws.id === activeWsId);
+        if (!current || current.brandName === state.brand.brandName) return prev;
         const updated = prev.map((ws) =>
-          ws.id === activeWsId ? { ...ws, brandName: state.brand.brandName || ws.brandName } : ws,
+          ws.id === activeWsId ? { ...ws, brandName: state.brand.brandName } : ws,
         );
-        localStorage.setItem(WORKSPACES_KEY, JSON.stringify(updated));
+        saveSovereignValue(WORKSPACES_KEY, updated).catch(() => {});
         return updated;
       });
     }
@@ -409,6 +457,9 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
   stateRef.current = state;
   const busyRef = useRef(busy);
   busyRef.current = busy;
+  /** ref to the active workspace id for async callbacks (scheduler, batch runs) */
+  const activeWsIdRef = useRef(activeWsId);
+  activeWsIdRef.current = activeWsId;
 
   /** ref to latest callScrapeOne so the scheduler callback doesn't use stale brand terms */
   const callScrapeOneRef = useRef<(prompt: string, provider: Provider) => Promise<ScrapeRun | null>>(
@@ -469,9 +520,16 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
     // Detect drift against existing runs
     const newAlerts = detectDrift(allRuns, s.runs);
 
+    let saved = allRuns;
+    try {
+      saved = await persistRuns(activeWsIdRef.current, allRuns);
+    } catch {
+      setMessage("Auto-run: cloud save failed — results kept in memory only.");
+    }
+
     setState((prev) => ({
       ...prev,
-      runs: [...allRuns, ...prev.runs].slice(0, 500),
+      runs: [...saved, ...prev.runs],
       lastScheduledRun: new Date().toISOString(),
       driftAlerts: [...newAlerts, ...prev.driftAlerts].slice(0, 100),
     }));
@@ -480,7 +538,6 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
       `Auto-run complete: ${allRuns.length} results.${newAlerts.length > 0 ? ` ${newAlerts.length} drift alert${newAlerts.length > 1 ? "s" : ""} triggered.` : ""}`,
     );
     setBusy(false);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   /** Set up / tear down the scheduler interval */
@@ -518,8 +575,12 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
 
   function switchWorkspace(wsId: string) {
     if (demoMode) { setMessage("Demo mode — workspaces are read-only"); return; }
-    // Save current state first
-    saveSovereignValue(storageKeyForWorkspace(activeWsId), state);
+    // Save current state first — but never an un-hydrated state: while the
+    // cloud load is in flight (or failed) `state` is still defaultState and
+    // saving it would wipe the real settings blob.
+    if (hydratedWsRef.current === activeWsId) {
+      saveSettingsBlob(activeWsId, state).catch(() => {});
+    }
     setActiveWsId(wsId);
     localStorage.setItem(ACTIVE_WS_KEY, wsId);
     setShowWsPicker(false);
@@ -531,9 +592,11 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
     const ws: Workspace = { id: generateId(), brandName: name, createdAt: new Date().toISOString() };
     const updated = [...workspaces, ws];
     setWorkspaces(updated);
-    localStorage.setItem(WORKSPACES_KEY, JSON.stringify(updated));
-    // Save current, switch to new
-    saveSovereignValue(storageKeyForWorkspace(activeWsId), state);
+    saveSovereignValue(WORKSPACES_KEY, updated).catch(() => {});
+    // Save current, switch to new — same hydration guard as switchWorkspace
+    if (hydratedWsRef.current === activeWsId) {
+      saveSettingsBlob(activeWsId, state).catch(() => {});
+    }
     setState({ ...defaultState, brand: { ...defaultState.brand, brandName: name } });
     setActiveWsId(ws.id);
     localStorage.setItem(ACTIVE_WS_KEY, ws.id);
@@ -547,8 +610,9 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
     if (!window.confirm("Delete this workspace and all its data?")) return;
     const updated = workspaces.filter((w) => w.id !== wsId);
     setWorkspaces(updated);
-    localStorage.setItem(WORKSPACES_KEY, JSON.stringify(updated));
-    clearSovereignStore(storageKeyForWorkspace(wsId));
+    saveSovereignValue(WORKSPACES_KEY, updated).catch(() => {});
+    clearSovereignStore(storageKeyForWorkspace(wsId)).catch(() => {});
+    apiDeleteRunsForWorkspace(wsId).catch(() => {});
     if (activeWsId === wsId) {
       switchWorkspace(updated[0].id);
     }
@@ -865,14 +929,24 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
         return;
       }
 
+      let saved = runs;
+      let persistFailed = false;
+      try {
+        saved = await persistRuns(activeWsIdRef.current, runs);
+      } catch {
+        persistFailed = true;
+      }
+
       setState((prev) => ({
         ...prev,
-        runs: [...runs, ...prev.runs].slice(0, 500),
+        runs: [...saved, ...prev.runs],
       }));
 
       const failed = count - runs.length;
       setMessage(
-        `Done: ${runs.length}/${count} model${count > 1 ? "s" : ""} returned results.${failed > 0 ? ` ${failed} failed.` : ""}`,
+        persistFailed
+          ? "Results shown, but cloud save failed — they may disappear on reload."
+          : `Done: ${runs.length}/${count} model${count > 1 ? "s" : ""} returned results.${failed > 0 ? ` ${failed} failed.` : ""}`,
       );
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Failed to run scraper.");
@@ -913,13 +987,23 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
       }
     }
 
+    let saved = allRuns;
+    let persistFailed = false;
+    try {
+      saved = await persistRuns(activeWsIdRef.current, allRuns);
+    } catch {
+      persistFailed = true;
+    }
+
     setState((prev) => ({
       ...prev,
-      runs: [...allRuns, ...prev.runs].slice(0, 500),
+      runs: [...saved, ...prev.runs],
     }));
 
     setMessage(
-      `Batch complete: ${allRuns.length} results from ${prompts.length} prompts × ${providers.length} models.${failed > 0 ? ` ${failed} failed.` : ""}`,
+      persistFailed
+        ? "Results shown, but cloud save failed — they may disappear on reload."
+        : `Batch complete: ${allRuns.length} results from ${prompts.length} prompts × ${providers.length} models.${failed > 0 ? ` ${failed} failed.` : ""}`,
     );
     setBusy(false);
   }
@@ -955,6 +1039,13 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
         ? prev.runs.filter((r) => r.prompt !== value && r.prompt !== value.replace(/\{brand\}/gi, prev.brand.brandName || "our brand"))
         : prev.runs,
     }));
+    if (deleteResponses && !demoMode) {
+      const substituted = value.replace(/\{brand\}/gi, state.brand.brandName || "our brand");
+      apiDeleteRunsByPrompt(activeWsIdRef.current, value).catch(() => {});
+      if (substituted !== value) {
+        apiDeleteRunsByPrompt(activeWsIdRef.current, substituted).catch(() => {});
+      }
+    }
   }
 
   function updatePromptTags(text: string, tags: string[]) {
@@ -967,10 +1058,14 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
   }
 
   function deleteRun(index: number) {
+    const target = state.runs[index];
     setState((prev) => ({
       ...prev,
       runs: prev.runs.filter((_, i) => i !== index),
     }));
+    if (!demoMode && target?.id) {
+      apiDeleteRun(target.id).catch(() => setMessage("Failed to delete the run from the cloud."));
+    }
   }
 
   function extractNicheQueries(payload: unknown) {
@@ -1238,7 +1333,13 @@ Now analyze all ${competitorList.length} competitors:`,
   async function handleResetData() {
     if (demoMode) { setMessage("Demo mode — data cannot be modified"); return; }
     if (!window.confirm("This will delete ALL saved data (runs, prompts, settings). Continue?")) return;
-    await clearSovereignStore(storageKeyForWorkspace(activeWsId));
+    try {
+      await clearSovereignStore(storageKeyForWorkspace(activeWsId));
+      await apiDeleteRunsForWorkspace(activeWsId);
+    } catch {
+      setMessage("Failed to clear cloud data — try again.");
+      return;
+    }
     setState(defaultState);
     setMessage("All data cleared.");
   }
@@ -1535,7 +1636,7 @@ Now analyze all ${competitorList.length} competitors:`,
 
         {/* Footer info */}
         <div className="border-t border-th-border px-4 py-2 text-center text-xs leading-relaxed text-th-text-muted">
-          <div>{demoMode ? "Read-only demo" : `Local-first · ${workspaces.length} workspace${workspaces.length > 1 ? "s" : ""}`}</div>
+          <div>{demoMode ? "Read-only demo" : `Cloud sync · ${workspaces.length} workspace${workspaces.length > 1 ? "s" : ""}`}</div>
           <div className="mt-1">
             Built by{" "}
             <a

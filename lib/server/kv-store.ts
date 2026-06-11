@@ -2,8 +2,9 @@ import { getServerSupabase } from "./supabase";
 
 /**
  * Server-side KV operations backed by Supabase `kv_store` table.
- * Mirrors the contract of lib/client/sovereign-store.ts so clients can
- * swap between local IndexedDB and cloud transparently.
+ * Mirrors the contract of lib/client/sovereign-store.ts, which reaches these
+ * via the /api/state route. Supabase is the single source of truth — there is
+ * no local fallback.
  */
 
 export type KvResult<T> =

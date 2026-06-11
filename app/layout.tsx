@@ -16,7 +16,7 @@ const jetbrainsMono = JetBrains_Mono({
 
 export const metadata: Metadata = {
   title: "GEO/AEO Tracker",
-  description: "BYOK AEO/GEO intelligence dashboard with local-first persistence",
+  description: "BYOK AEO/GEO intelligence dashboard with Supabase-backed persistence",
 };
 
 /** Inline script to apply theme before first paint — prevents flash */

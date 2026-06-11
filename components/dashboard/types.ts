@@ -7,6 +7,8 @@ export type Provider =
   | "grok";
 
 export type ScrapeRun = {
+  /** Supabase row id; absent only for demo data and unsaved in-memory runs */
+  id?: string;
   provider: Provider;
   prompt: string;
   answer: string;

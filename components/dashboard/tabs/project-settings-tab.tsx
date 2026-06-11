@@ -1,10 +1,5 @@
-import { useState, useSyncExternalStore } from "react";
+import { useState } from "react";
 import type { BrandConfig } from "@/components/dashboard/types";
-import {
-  isCloudAvailable,
-  isCloudEnabledByUser,
-  setCloudEnabledByUser,
-} from "@/lib/client/cloud-mode";
 
 type ProjectSettingsTabProps = {
   brand: BrandConfig;
@@ -19,8 +14,8 @@ export function ProjectSettingsTab({ brand, onBrandChange, onReset }: ProjectSet
         <div className="mb-3 text-base font-semibold text-th-text">Brand & Website</div>
         <p className="mb-4 text-sm leading-relaxed text-th-text-muted">
           Configure your brand so every prompt, audit, and analysis is contextualized
-          for your website. Data is stored locally in your browser — or in Supabase
-          if cloud sync is enabled below.
+          for your website. Data is stored in your Supabase project and persists
+          across devices and browsers.
         </p>
       </div>
 
@@ -85,8 +80,6 @@ export function ProjectSettingsTab({ brand, onBrandChange, onReset }: ProjectSet
         />
       </div>
 
-      <CloudSyncCard />
-
       {/* Danger zone */}
       {onReset && (
         <div className="rounded-lg border border-th-danger/30 bg-th-danger-soft p-4">
@@ -100,76 +93,6 @@ export function ProjectSettingsTab({ brand, onBrandChange, onReset }: ProjectSet
           </button>
         </div>
       )}
-    </div>
-  );
-}
-
-function subscribeToCloudPref(callback: () => void): () => void {
-  if (typeof window === "undefined") return () => {};
-  const handler = (e: StorageEvent) => {
-    if (e.key === "sovereign-cloud-sync") callback();
-  };
-  window.addEventListener("storage", handler);
-  return () => window.removeEventListener("storage", handler);
-}
-
-function CloudSyncCard() {
-  const enabled = useSyncExternalStore(
-    subscribeToCloudPref,
-    () => isCloudEnabledByUser(),
-    () => true,
-  );
-  const available = useSyncExternalStore(
-    () => () => {},
-    () => isCloudAvailable(),
-    () => false,
-  );
-
-  if (!available) {
-    return (
-      <div className="rounded-lg border border-th-border bg-th-surface p-4">
-        <div className="mb-1 text-xs font-semibold uppercase tracking-wider text-th-text-muted">
-          Cloud Sync
-        </div>
-        <p className="text-sm leading-relaxed text-th-text-muted">
-          Cloud storage is not configured on this deployment. Your data is saved
-          locally in your browser (IndexedDB). To enable cloud sync, set{" "}
-          <code className="rounded bg-th-surface-muted px-1 py-0.5 text-xs">SUPABASE_URL</code>,{" "}
-          <code className="rounded bg-th-surface-muted px-1 py-0.5 text-xs">SUPABASE_SERVICE_ROLE_KEY</code>, and{" "}
-          <code className="rounded bg-th-surface-muted px-1 py-0.5 text-xs">NEXT_PUBLIC_CLOUD_STORAGE_ENABLED=true</code>{" "}
-          in your deployment environment. See the README for setup instructions.
-        </p>
-      </div>
-    );
-  }
-
-  function toggle() {
-    const next = !enabled;
-    setCloudEnabledByUser(next);
-    // Reload so useSyncExternalStore re-reads and every consumer picks up the new mode.
-    if (typeof window !== "undefined") window.location.reload();
-  }
-
-  return (
-    <div className="rounded-lg border border-th-border bg-th-surface p-4">
-      <div className="mb-1 text-xs font-semibold uppercase tracking-wider text-th-text-muted">
-        Cloud Sync
-      </div>
-      <p className="mb-3 text-sm leading-relaxed text-th-text-muted">
-        {enabled
-          ? "Your data is synced to Supabase and will persist across devices and browsers."
-          : "Cloud sync is disabled. Data is only stored locally in this browser."}
-      </p>
-      <button
-        onClick={toggle}
-        className="rounded-lg border border-th-border bg-th-surface-muted px-4 py-2 text-sm font-medium text-th-text hover:bg-th-surface"
-      >
-        {enabled ? "Disable cloud sync (local-only)" : "Enable cloud sync"}
-      </button>
-      <p className="mt-2 text-xs text-th-text-muted">
-        Toggling will reload the page. Existing local data is preserved when
-        switching modes but may not automatically sync to the other store.
-      </p>
     </div>
   );
 }

@@ -11,7 +11,7 @@ const ProviderSchema = z.enum([
 
 type Provider = z.infer<typeof ProviderSchema>;
 
-const OUTPUT_CACHE_TTL_MS = 1000 * 60 * 20;
+const OUTPUT_CACHE_TTL_MS = 1000 * 60 * 60;
 
 const inMemoryCache = new Map<
   string,
@@ -41,6 +41,7 @@ type ScrapeRequest = {
   prompt: string;
   requireSources?: boolean;
   country?: string;
+  forceRefresh?: boolean;
 };
 
 type NormalizedScrapeResult = {
@@ -63,7 +64,10 @@ function getDatasetId(provider: Provider) {
 }
 
 function buildCacheKey(input: ScrapeRequest) {
-  return JSON.stringify(input);
+  // forceRefresh must NOT be part of the key — otherwise a fresh run would
+  // write to a separate cache slot and never overwrite the cached answer.
+  const { provider, prompt, requireSources, country } = input;
+  return JSON.stringify({ provider, prompt, requireSources, country });
 }
 
 function withAuthHeaders() {
@@ -370,7 +374,7 @@ export async function runAiScraper(
 
   const cacheKey = buildCacheKey(request);
   const cacheHit = inMemoryCache.get(cacheKey);
-  if (cacheHit && cacheHit.expiresAt > Date.now()) {
+  if (!request.forceRefresh && cacheHit && cacheHit.expiresAt > Date.now()) {
     return {
       ...cacheHit.value,
       cached: true,

@@ -24,6 +24,14 @@ export type ScrapeRun = {
   brandMentions: string[];
   /** Competitor names found in the answer */
   competitorMentions: string[];
+  /**
+   * Transient (not persisted): true when the server returned this answer from
+   * its in-memory cache. A cached run is skipped from DB persistence, judging,
+   * and state only when an identical row is already present — see
+   * dropDuplicateCached. If the matching row is missing (e.g. an earlier
+   * persist failed), the cached run is kept so the data isn't lost.
+   */
+  cached?: boolean;
 };
 
 /** Structured section inside a battlecard */

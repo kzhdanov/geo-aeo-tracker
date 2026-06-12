@@ -163,6 +163,23 @@ function generateId() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 }
 
+/**
+ * Drop a server-cached run only when an equivalent row is already in state.
+ *
+ * A cached answer is byte-identical to a prior run, so if that prior run was
+ * actually persisted it's already present and the cached copy is a true
+ * duplicate. But the server caches before the client persists — if a previous
+ * persist failed, the row is absent from both DB and state. Trusting the
+ * `cached` flag blindly would then silently discard recoverable data, so we
+ * verify presence by (provider, prompt, answer) and keep any cached run that
+ * isn't actually here yet.
+ */
+function dropDuplicateCached(runs: ScrapeRun[], existing: ScrapeRun[]): ScrapeRun[] {
+  const key = (r: ScrapeRun) => `${r.provider} § ${r.prompt} § ${r.answer}`;
+  const seen = new Set(existing.map(key));
+  return runs.filter((r) => !r.cached || !seen.has(key(r)));
+}
+
 const defaultState: AppState = {
   brand: {
     brandName: "",
@@ -584,12 +601,18 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
       }
     }
 
-    // Detect drift against existing runs
-    const newAlerts = detectDrift(allRuns, s.runs);
+    // A cached answer that's already a stored row adds nothing — exclude it
+    // from drift, persist, judge, and state. But keep a cached run whose row
+    // is missing (e.g. an earlier persist failed) so it isn't lost.
+    const fresh = dropDuplicateCached(allRuns, s.runs);
+    const cachedCount = allRuns.length - fresh.length;
 
-    let saved = allRuns;
+    // Detect drift against existing runs
+    const newAlerts = detectDrift(fresh, s.runs);
+
+    let saved = fresh;
     try {
-      saved = await persistRuns(activeWsIdRef.current, allRuns);
+      saved = await persistRuns(activeWsIdRef.current, fresh);
     } catch {
       setMessage("Auto-run: cloud save failed — results kept in memory only.");
     }
@@ -603,8 +626,9 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
 
     void autoJudge(saved); // background: score the new runs
 
+    const cachedNote = cachedCount > 0 ? ` ${cachedCount} from cache (skipped).` : "";
     setMessage(
-      `Auto-run complete: ${allRuns.length} results.${newAlerts.length > 0 ? ` ${newAlerts.length} drift alert${newAlerts.length > 1 ? "s" : ""} triggered.` : ""}`,
+      `Auto-run complete: ${fresh.length} new results.${cachedNote}${newAlerts.length > 0 ? ` ${newAlerts.length} drift alert${newAlerts.length > 1 ? "s" : ""} triggered.` : ""}`,
     );
     setBusy(false);
   }, [autoJudge]);
@@ -935,7 +959,7 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
   }
 
   /** Run a single scrape against one specific provider */
-  async function callScrapeOne(prompt: string, provider: Provider, tags: string[] = []): Promise<ScrapeRun | null> {
+  async function callScrapeOne(prompt: string, provider: Provider, tags: string[] = [], forceRefresh = false): Promise<ScrapeRun | null> {
     if (demoMode) { setMessage("Demo mode — API calls are disabled"); return null; }
     try {
       const response = await fetch("/api/scrape", {
@@ -945,6 +969,7 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
           provider,
           prompt,
           requireSources: true,
+          forceRefresh,
         }),
       });
 
@@ -967,6 +992,7 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
         sentiment: detectSentiment(answerText, brandTerms),
         brandMentions: findMentions(answerText, brandTerms),
         competitorMentions: findMentions(answerText, competitorTerms),
+        cached: data.cached === true,
       };
     } catch {
       return null;
@@ -999,10 +1025,15 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
         return;
       }
 
-      let saved = runs;
+      // Skip cached answers that already match a stored row; keep any whose
+      // row is missing (e.g. an earlier persist failed) so it isn't lost.
+      const fresh = dropDuplicateCached(runs, stateRef.current.runs);
+      const cachedCount = runs.length - fresh.length;
+
+      let saved = fresh;
       let persistFailed = false;
       try {
-        saved = await persistRuns(activeWsIdRef.current, runs);
+        saved = await persistRuns(activeWsIdRef.current, fresh);
       } catch {
         persistFailed = true;
       }
@@ -1015,10 +1046,11 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
       void autoJudge(saved); // background: score the new runs
 
       const failed = count - runs.length;
+      const cachedNote = cachedCount > 0 ? ` ${cachedCount} from cache (skipped).` : "";
       setMessage(
         persistFailed
           ? "Results shown, but cloud save failed — they may disappear on reload."
-          : `Done: ${runs.length}/${count} model${count > 1 ? "s" : ""} returned results.${failed > 0 ? ` ${failed} failed.` : ""}`,
+          : `Done: ${fresh.length}/${count} model${count > 1 ? "s" : ""} returned new results.${cachedNote}${failed > 0 ? ` ${failed} failed.` : ""}`,
       );
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Failed to run scraper.");
@@ -1028,7 +1060,7 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
   }
 
   /** Batch run all custom prompts across all active providers — fully parallel */
-  async function batchRunAllPrompts() {
+  async function batchRunAllPrompts(forceRefresh = false) {
     const prompts = state.customPrompts.map((p) => ({
       text: p.text.replace(/\{brand\}/gi, state.brand.brandName || "our brand"),
       tags: p.tags,
@@ -1042,11 +1074,15 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
       : [state.provider];
     const totalJobs = prompts.length * providers.length;
     setBusy(true);
-    setMessage(`Batch: launching ${totalJobs} jobs in parallel...`);
+    setMessage(
+      forceRefresh
+        ? `Batch (fresh, ignoring cache): launching ${totalJobs} jobs in parallel...`
+        : `Batch: launching ${totalJobs} jobs in parallel...`,
+    );
 
     // Fire ALL prompt × provider combinations at once
     const jobs = prompts.flatMap(({ text, tags }) =>
-      providers.map((p) => callScrapeOne(text, p, tags)),
+      providers.map((p) => callScrapeOne(text, p, tags, forceRefresh)),
     );
     const results = await Promise.allSettled(jobs);
 
@@ -1060,10 +1096,15 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
       }
     }
 
-    let saved = allRuns;
+    // Skip cached answers that already match a stored row; keep any whose row
+    // is missing (e.g. an earlier persist failed) so it isn't lost.
+    const fresh = dropDuplicateCached(allRuns, stateRef.current.runs);
+    const cachedCount = allRuns.length - fresh.length;
+
+    let saved = fresh;
     let persistFailed = false;
     try {
-      saved = await persistRuns(activeWsIdRef.current, allRuns);
+      saved = await persistRuns(activeWsIdRef.current, fresh);
     } catch {
       persistFailed = true;
     }
@@ -1075,10 +1116,11 @@ export function SovereignDashboard({ demoMode = false }: { demoMode?: boolean } 
 
     void autoJudge(saved); // background: score the new runs
 
+    const cachedNote = cachedCount > 0 ? ` ${cachedCount} served from cache (skipped).` : "";
     setMessage(
       persistFailed
         ? "Results shown, but cloud save failed — they may disappear on reload."
-        : `Batch complete: ${allRuns.length} results from ${prompts.length} prompts × ${providers.length} models.${failed > 0 ? ` ${failed} failed.` : ""}`,
+        : `Batch complete: ${fresh.length} new results from ${prompts.length} prompts × ${providers.length} models.${cachedNote}${failed > 0 ? ` ${failed} failed.` : ""}`,
     );
     setBusy(false);
   }

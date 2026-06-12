@@ -10,7 +10,7 @@ type PromptHubTabProps = {
   onRemoveCustomPrompt: (value: string, deleteResponses?: boolean) => void;
   onUpdatePromptTags: (text: string, tags: string[]) => void;
   onRunPrompt: (prompt: string, tags?: string[]) => void;
-  onBatchRunAll: () => void;
+  onBatchRunAll: (forceRefresh?: boolean) => void;
 };
 
 export function PromptHubTab({
@@ -61,14 +61,24 @@ export function PromptHubTab({
             Tracking Prompt Library
           </div>
           {customPrompts.length > 0 && (
-            <button
-              disabled={busy}
-              onClick={onBatchRunAll}
-              className="bd-btn-primary rounded-lg px-3 py-1.5 text-sm disabled:opacity-60"
-              title={`Run all ${customPrompts.length} prompts × ${activeProviderCount} model${activeProviderCount > 1 ? "s" : ""}`}
-            >
-              ▶ Run All ({customPrompts.length} × {activeProviderCount})
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                disabled={busy}
+                onClick={() => onBatchRunAll(false)}
+                className="bd-btn-primary rounded-lg px-3 py-1.5 text-sm disabled:opacity-60"
+                title={`Run all ${customPrompts.length} prompts × ${activeProviderCount} model${activeProviderCount > 1 ? "s" : ""} (uses cached answers from the last hour when available)`}
+              >
+                ▶ Run All ({customPrompts.length} × {activeProviderCount})
+              </button>
+              <button
+                disabled={busy}
+                onClick={() => onBatchRunAll(true)}
+                className="bd-chip rounded-lg px-3 py-1.5 text-sm disabled:opacity-60"
+                title="Force a fresh run — ignores the 1-hour cache and re-queries every model"
+              >
+                ↻ Fresh
+              </button>
+            </div>
           )}
         </div>
         <p className="mb-3 text-sm text-th-text-secondary">

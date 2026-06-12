@@ -24,6 +24,14 @@ type ReputationSourcesTabProps = {
   onVerdicts?: (analyses: RunAnalysis[]) => void;
 };
 
+/** Render a run's ISO timestamp as local "YYYY-MM-DD HH:mm" (down to the minute). */
+function formatRunTimestamp(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso.slice(0, 10);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
 function normalizeAnswerForDisplay(answer: string): string {
   let text = answer;
 
@@ -242,7 +250,7 @@ function ModelResponseCard({
             brandTerms={brandTerms}
             onJudge={onJudge}
           />
-          <span className="text-xs text-th-text-muted">{run.createdAt.slice(0, 10)}</span>
+          <span className="text-xs text-th-text-muted">{formatRunTimestamp(run.createdAt)}</span>
           <button
             type="button"
             onClick={() => setExpanded(!expanded)}

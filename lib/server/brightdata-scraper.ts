@@ -372,7 +372,11 @@ export async function runAiScraper(
     );
   }
 
-  const cacheKey = buildCacheKey(request);
+  // Always pin geo to the US by default: Bright Data proxies otherwise pick a
+  // random exit country per scrape, which makes runs incomparable.
+  const country = (request.country ?? "US").toUpperCase();
+
+  const cacheKey = buildCacheKey({ ...request, country });
   const cacheHit = inMemoryCache.get(cacheKey);
   if (!request.forceRefresh && cacheHit && cacheHit.expiresAt > Date.now()) {
     return {
@@ -385,11 +389,10 @@ export async function runAiScraper(
     url: providerBaseUrl[parsed],
     prompt: request.prompt,
     index: 1,
+    // Bright Data expects a 2-letter code in `country`; `geolocation` is a
+    // different field (lat,long coordinates) and must not carry the code.
+    country,
   };
-
-  if (request.country) {
-    inputRecord.geolocation = request.country;
-  }
 
   const scrapeResponse = await fetch(
     `https://api.brightdata.com/datasets/v3/scrape?dataset_id=${datasetId}&notify=false&include_errors=true&format=json`,
